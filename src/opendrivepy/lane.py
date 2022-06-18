@@ -1,3 +1,11 @@
+#!/usr/bin/env python
+# -*- encoding: utf-8 -*-
+'''
+@Description:       :
+@Date     :2022/06/16 14:43:25
+@Author      :chenqi
+@version      :1.0
+'''
 from __future__ import division, print_function, absolute_import
 
 
@@ -5,12 +13,11 @@ class Lanes(object):
     def __init__(self, lane_section_list):
         self.lane_offset = None
         self.lane_section_list = lane_section_list
-        
 
 
 class LaneSection(object):
-    def __init__(self, left, center, right,s=0):
-        self.s=s
+    def __init__(self, left, center, right, s=0):
+        self.s = s
         self.left = left
         self.right = right
         self.center = center
@@ -28,22 +35,23 @@ class LaneSection(object):
             elif lane.type == "sidewalk":
                 self.lswidth.append(lane.width.a)
         #删除
-        self.left.sort(key=lambda x:abs(int(x.id)))
-        self.right.sort(key=lambda x:abs(int(x.id)))
+        self.left.sort(key=lambda x: abs(int(x.id)))
+        self.right.sort(key=lambda x: abs(int(x.id)))
         for lane in self.right:
             if lane.type == "driving":
                 self.rn += 1
                 self.rdwidth.append(lane.width.a)
             elif lane.type == "sidewalk":
                 self.rswidth.append(lane.width.a)
-    def have_point(self,dis,next_lane=None):
+
+    def have_point(self, dis, next_lane=None):
         if next_lane:
-            if(dis>=self.s and dis <=next_lane.s+1):
+            if (dis >= self.s and dis <= next_lane.s + 1):
                 return True
             else:
                 return False
         else:
-            if dis>=self.s:
+            if dis >= self.s:
                 return True
             else:
                 return False
@@ -94,23 +102,25 @@ class Lane(object):
         self.speed = list()
         self.access = list()
         self.height = list()
-        self.width=None
+        self.width = None
         for width in self.width_list:
-            if width.a!=0 and abs(width.b)<0.01 and abs(width.c)<=0.01 and abs(width.d)<0.01:
-                self.width=width
-        if self.width==None and self.id !=0:
+            if width.a != 0 and abs(width.b) < 0.01 and abs(
+                    width.c) <= 0.01 and abs(width.d) < 0.01:
+                self.width = width
+        if self.width == None and self.id != 0:
             if len(self.width_list):
-                self.width=self.width_list[0]
-    def get_width(self,dis):
-        real_width=None
-        for i,width in enumerate(self.width_list):
-            if dis>=width.s_offset:
-                if i+1<len(self.width_list):
-                    if dis<self.width_list[i+1].s_offset:
-                        real_width=width
+                self.width = self.width_list[0]
+
+    def get_width(self, dis):
+        real_width = None
+        for i, width in enumerate(self.width_list):
+            if dis >= width.s_offset:
+                if i + 1 < len(self.width_list):
+                    if dis < self.width_list[i + 1].s_offset:
+                        real_width = width
                         break
                 else:
-                    real_width=width
+                    real_width = width
                     break
         if real_width:
             return real_width.get_width(dis)
@@ -129,8 +139,8 @@ class LaneWidth(object):
         self.b = b
         self.c = c
         self.d = d
-    def get_width(self,dis):
-        ds=dis-self.s_offset
-        width=self.a + self.b*ds + self.c*ds**2 + self.d*ds**3
-        return width
 
+    def get_width(self, dis):
+        ds = dis - self.s_offset
+        width = self.a + self.b * ds + self.c * ds**2 + self.d * ds**3
+        return width

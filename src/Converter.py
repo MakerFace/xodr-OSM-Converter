@@ -1,10 +1,21 @@
+#!/usr/bin/env python
+# -*- encoding: utf-8 -*-
+'''
+@Description:       :
+@Date     :2022/06/16 14:43:08
+@Author      :chenqi
+@version      :1.0
+'''
 from __future__ import division, absolute_import, print_function
 import xml.etree.ElementTree as ET
 from math import fabs, sqrt, sin, cos, pi
 import matplotlib.pyplot as plt
 from datetime import datetime
 
+from sympy import real_root
+
 from opendrivepy.opendrive import OpenDrive
+from opendrivepy.junction import Junction
 from opendrivepy.point import Point
 from tqdm import tqdm
 from pyqtree import Index
@@ -21,19 +32,21 @@ MAX_ARC_RADIUS = 50
 
 class Converter(object):
     """docstring for Converter"""
-
     def __init__(self, filename, scene_scale, min_distance):
         super(Converter, self).__init__()
+        self.road_types = [
+            "driving", "biking", "sidewalk", "restricted", "median"
+        ]
 
         print("Reading OpenDrive file: " + filename)
         self.opendrive = OpenDrive(filename)
         self.scale, minx, miny, maxx, maxy = self.set_scale(scene_scale)
         self.min_distance = min_distance
-        # print(self.scale)
 
         print("Converting...")
         self.node_id = 0
         self.ways = dict()
+        self.relations = dict()  # TODO add relations
         self.nodes = list()
 
         self.spindex = Index(bbox=(minx, miny, maxx, maxy))
@@ -67,7 +80,8 @@ class Converter(object):
     def convert(self):
         # 1. convert all roads into nodes+ways
         way_id = 0
-        junction_list=dict()
+        relation_id = 0
+        junction_list = dict()
         with tqdm(total=len(self.opendrive.roads), ascii=True) as pbar:
             for road_id, road in self.opendrive.roads.items():
                 # road.points=list(set(road.points))
@@ -104,94 +118,190 @@ class Converter(object):
                 #             junction_list[road.junction].append([road.predecessor,road.successor])
                 #     else:
                 #         junction_list[road.junction]=list()
-
                 road.start_lway_id = way_id
                 pbar.set_description("Processing road_id=%s" % road_id)
                 offset = 0
-                next_lane=None
-                for lane_i,lane_section in enumerate(road.lane_section_list):
+                next_lane = None
+                for lane_i, lane_section in enumerate(road.lane_section_list):
+                    mid_way_id = -1
                     offset = 0
-                    if lane_i+1>=len(road.lane_section_list):
-                        next_lane=None
+                    if lane_i + 1 >= len(road.lane_section_list):
+                        next_lane = None
                     else:
-                        next_lane=road.lane_section_list[lane_i+1]
-                    point_to_width=dict()
-                    for lane in lane_section.left:
-                            way_nodes_id = list()
-                            for point in road.points:
-                                dis=point.s
-                                # if dis>1274:
-                                #     print("here")
-                                if lane_section.have_point(dis,next_lane):
-                                    width=lane.get_width(dis-lane_section.s)
-                                    offset=0
-                                    if point in point_to_width:
-                                        offset=point_to_width[point]
-                                    point_to_width[point]=width+offset
-                                    # width=0
-                                    if lane.type == "driving":
-                                        dx = cos(point.rad + pi / 2) * (offset+ (width / 2))
-                                        dy = sin(point.rad + pi / 2) * ( offset+ (width / 2))
-                                        new_node_id = self.add_node(point.x + dx, point.y + dy, point.z)
-                                        # print(new_node_id)
-                                        if not (new_node_id in way_nodes_id): # not exists in current way_nodes_id
-                                            way_nodes_id.append(new_node_id)
-                            if len(way_nodes_id) > 0:
-                                ws_left, wd_left, n_left = lane_section.get_left_width()
-                                ws_right, wd_right, n_right = lane_section.get_right_width()
-                                # width = wd_left + wd_right
+                        next_lane = road.lane_section_list[lane_i + 1]
+                    point_to_width = dict()
+                    relation_ways_id = []
+                    left_nodes_id = list()
+                    for i, lane in enumerate(lane_section.left):
+                        right_nodes_id = list()
+                        for point in road.points:
+                            dis = point.s
+                            # if dis>1274:
+                            #     print("here")
+                            if lane_section.have_point(dis, next_lane):
+                                width = lane.get_width(dis - lane_section.s)
+                                offset = 0
+                                if point in point_to_width:
+                                    offset = point_to_width[point]
+                                point_to_width[point] = width + offset
+                                if i == 0:  # NOTE generate left lane
+                                    dx = cos(point.rad + pi / 2) * offset
+                                    dy = sin(point.rad + pi / 2) * offset
+                                    new_node_id = self.add_node(
+                                        point.x + dx, point.y + dy, point.z)
+                                    if not (new_node_id in left_nodes_id):
+                                        left_nodes_id.append(new_node_id)
 
-                                # offset = width/2 - wd_right
-                                offset=width
-                                way_nodes_id.reverse()
-                                self.ways[way_id] = Way(
-                                    way_id, way_nodes_id, width, offset, road.is_connection, road.style, n_left, n_right, ws_left, ws_right)
-                                way_id += 1
-                                # if way_id==8:
-                                #     print("here")
+                                # width=0
+                                if lane.type in self.road_types:
+                                    dx = cos(point.rad + pi / 2) * (offset +
+                                                                    width)
+                                    dy = sin(point.rad + pi / 2) * (offset +
+                                                                    width)
+                                    new_node_id = self.add_node(
+                                        point.x + dx, point.y + dy, point.z)
+                                    # print(new_node_id)
+                                    if not (
+                                            new_node_id in right_nodes_id
+                                    ):  # not exists in current way_nodes_id
+                                        right_nodes_id.append(new_node_id)
+                        if len(left_nodes_id) > 0 and i == 0:
+                            ws_left, wd_left, n_left = lane_section.get_left_width(
+                            )
+                            ws_right, wd_right, n_right = lane_section.get_right_width(
+                            )
+                            # width = wd_left + wd_right
+
+                            # offset = width/2 - wd_right
+                            offset = width
+                            left_nodes_id.reverse()
+                            self.ways[way_id] = Way(way_id, left_nodes_id,
+                                                    width, offset,
+                                                    road.is_connection,
+                                                    road.style, n_left,
+                                                    n_right, ws_left, ws_right)
+                            relation_ways_id.append(way_id)
+                            way_id += 1
+                            # if way_id==8:
+                            #     print("here")
+                        if len(right_nodes_id) > 0:
+                            ws_left, wd_left, n_left = lane_section.get_left_width(
+                            )
+                            ws_right, wd_right, n_right = lane_section.get_right_width(
+                            )
+                            # width = wd_left + wd_right
+
+                            # offset = width/2 - wd_right
+                            offset = width
+                            right_nodes_id.reverse()
+                            self.ways[way_id] = Way(way_id, right_nodes_id,
+                                                    width, offset,
+                                                    road.is_connection,
+                                                    road.style, n_left,
+                                                    n_right, ws_left, ws_right)
+                            relation_ways_id.append(way_id)
+                            way_id += 1
+
+                        self.relations[relation_id] = Relation(
+                            relation_id,
+                            relation_ways_id,
+                            ways_role=['left', 'right'])
+                        relation_id += 1
+                        relation_ways_id = relation_ways_id[1:]
+                        left_nodes_id = right_nodes_id
+
+                    relation_ways_id = []
                     road.start_rway_id = way_id
                     offset = 0
-                    point_to_width=dict()
-                    for lane in lane_section.right:
-                        
-                            way_nodes_id = list()
-                            for point in road.points:
-                                dis=point.s
-                                if lane_section.have_point(dis,next_lane):
-                                    width=lane.get_width(dis-lane_section.s)
-                                    offset=0
-                                    if point in point_to_width:
-                                        offset=point_to_width[point]
-                                    point_to_width[point]=width+offset
-                                    # width=0
-                                    # if abs(width-5.419095)<0.01:
-                                    #     continue
-                                    # if width<last_width:
-                                    #     #5.419095
-                                    last_width=width
-                                    if lane.type == "driving":
-                                        dx = cos(point.rad - pi / 2) * (offset+ (width / 2))
-                                        dy = sin(point.rad - pi / 2) * ( offset+(width / 2))
-                                        new_node_id = self.add_node(point.x + dx, point.y + dy, point.z)
+                    point_to_width = dict()
+                    # TODO 生成右车道，并添加relations
+                    left_nodes_id = list()
+                    for i, lane in enumerate(lane_section.right):
 
-                                        # print(new_node_id)
-                                        if not (new_node_id in way_nodes_id): # not exists in current way_nodes_id
-                                            way_nodes_id.append(new_node_id)
+                        right_nodes_id = list()
+                        for point in road.points:
+                            dis = point.s
+                            if lane_section.have_point(dis, next_lane):
+                                width = lane.get_width(dis - lane_section.s)
+                                offset = 0
+                                if point in point_to_width:
+                                    offset = point_to_width[point]
+                                point_to_width[point] = width + offset
+                                # width=0
+                                # if abs(width-5.419095)<0.01:
+                                #     continue
+                                # if width<last_width:
+                                #     #5.419095
+                                last_width = width
+                                if i == 0:
+                                    dx = cos(point.rad - pi / 2) * offset
+                                    dy = sin(point.rad - pi / 2) * offset
+                                    new_node_id = self.add_node(
+                                        point.x + dx, point.y + dy, point.z)
+                                    if not (new_node_id in left_nodes_id):
+                                        left_nodes_id.append(new_node_id)
+                                if lane.type in self.road_types:
+                                    dx = cos(point.rad - pi / 2) * (offset +
+                                                                    width)
+                                    dy = sin(point.rad - pi / 2) * (offset +
+                                                                    width)
+                                    new_node_id = self.add_node(
+                                        point.x + dx, point.y + dy, point.z)
 
-                            if len(way_nodes_id) > 0:
-                                ws_left, wd_left, n_left = lane_section.get_left_width()
-                                ws_right, wd_right, n_right = lane_section.get_right_width()
-                                # width = wd_left + wd_right
+                                    # print(new_node_id)
+                                    if not (
+                                            new_node_id in right_nodes_id
+                                    ):  # not exists in current way_nodes_id
+                                        right_nodes_id.append(new_node_id)
 
-                                # offset = width/2 - wd_right
-                                offset = width
-                                self.ways[way_id] = Way(
-                                    way_id, way_nodes_id, width, offset, road.is_connection, road.style, n_left, n_right, ws_left, ws_right)
+                        if len(left_nodes_id) > 0 and i == 0:
+                            ws_left, wd_left, n_left = lane_section.get_left_width(
+                            )
+                            ws_right, wd_right, n_right = lane_section.get_right_width(
+                            )
+                            # width = wd_left + wd_right
+
+                            # offset = width/2 - wd_right
+                            offset = width
+                            self.ways[way_id] = Way(way_id, left_nodes_id,
+                                                    width, offset,
+                                                    road.is_connection,
+                                                    road.style, n_left,
+                                                    n_right, ws_left, ws_right)
 
                             # offset += width
-                                way_id += 1
-                                # if way_id==8:
-                                #     print("here")
+                            relation_ways_id.append(way_id)
+                            way_id += 1
+                            # if way_id==8:
+                            #     print("here")
+                        if len(right_nodes_id) > 0:
+                            ws_left, wd_left, n_left = lane_section.get_left_width(
+                            )
+                            ws_right, wd_right, n_right = lane_section.get_right_width(
+                            )
+                            # width = wd_left + wd_right
+
+                            # offset = width/2 - wd_right
+                            offset = width
+                            self.ways[way_id] = Way(way_id, right_nodes_id,
+                                                    width, offset,
+                                                    road.is_connection,
+                                                    road.style, n_left,
+                                                    n_right, ws_left, ws_right)
+
+                            # offset += width
+                            relation_ways_id.append(way_id)
+                            way_id += 1
+                            # if way_id==8:
+                            #     print("here")
+                        self.relations[relation_id] = Relation(
+                            relation_id,
+                            relation_ways_id,
+                            ways_role=['left', 'right'])
+                        relation_id += 1
+                        relation_ways_id = relation_ways_id[1:]
+                        left_nodes_id = right_nodes_id
+
                 pbar.update(1)
 
         # 2. handle the junctions: merge nodes & switch the end points of roads
@@ -200,15 +310,19 @@ class Converter(object):
         #         is_Tshape_junction = False
         #         is_Xshape_junction = False
 
+        #         print(junction.lane_link)
         #         if len(junction.lane_link) == 3:
-        #             is_Tshape_junction = self.handle_Tshape(junction)
+        #             pass
+        #             # is_Tshape_junction = self.handle_Tshape(junction)
 
         #         if len(junction.lane_link) == 4:
         #             is_Xshape_junction = True
-        #             self.handle_Xshape(junction)
+        #             pass
+        #             # self.handle_Xshape(junction)
 
         #         if not is_Tshape_junction and not is_Xshape_junction:
-        #             self.handle_Nshape(junction)
+        #             pass
+        #             # self.handle_Nshape(junction)
 
         # return ways, nodes
 
@@ -223,7 +337,6 @@ class Converter(object):
             return 0
         else:
             return -1
-
 
     def handle_Tshape(self, junction):
         # A T shape junction would be like:
@@ -276,26 +389,35 @@ class Converter(object):
             contact_point = connection.contact_point
             incoming_road = connection.incoming_road
             connecting_road = connection.connecting_road
-            
 
             # 1. add the contact point (1,2) of a T junction
-            if self.ways[self.opendrive.roads[connecting_road].start_lway_id].style == 'line':
-                inn = self.opendrive.roads[incoming_road].ln if side=='l' else self.opendrive.roads[incoming_road].rn
-                con = self.opendrive.roads[connecting_road].ln if side=='l' else self.opendrive.roads[connecting_road].rn
+            if self.ways[self.opendrive.roads[connecting_road].
+                         start_lway_id].style == 'line':
+                inn = self.opendrive.roads[
+                    incoming_road].ln if side == 'l' else self.opendrive.roads[
+                        incoming_road].rn
+                con = self.opendrive.roads[
+                    connecting_road].ln if side == 'l' else self.opendrive.roads[
+                        connecting_road].rn
                 min = inn if inn < con else con
                 if (roadcnt >= min):
                     continue
                 ret += 1
-                connecting_way = self.opendrive.roads[connecting_road].start_lway_id + roadcnt if side=='l' else self.opendrive.roads[connecting_road].start_rway_id + roadcnt
-                incoming_way = self.opendrive.roads[incoming_road].start_lway_id + roadcnt if side=='l' else self.opendrive.roads[incoming_road].start_rway_id + roadcnt
-                contact_node_id = self.ways[connecting_way].nodes_id[0 if contact_point == 'start' else -1]
+                connecting_way = self.opendrive.roads[
+                    connecting_road].start_lway_id + roadcnt if side == 'l' else self.opendrive.roads[
+                        connecting_road].start_rway_id + roadcnt
+                incoming_way = self.opendrive.roads[
+                    incoming_road].start_lway_id + roadcnt if side == 'l' else self.opendrive.roads[
+                        incoming_road].start_rway_id + roadcnt
+                contact_node_id = self.ways[connecting_way].nodes_id[
+                    0 if contact_point == 'start' else -1]
                 way_end = self.way_end_to_point(contact_node_id, incoming_way)
                 line1_nodes.append(
                     self.nodes[self.ways[incoming_way].nodes_id[way_end]])
-                    
+
                 incomings.append(incoming_way)
                 ends.append(way_end)
-                
+
                 # search and delete the incoming road in lane_link we just used
                 for i in range(len(lane_link)):
                     if lane_link[i][0] == incoming_road:
@@ -310,34 +432,42 @@ class Converter(object):
 
             # 2. add the contact point (3,4) of a T junction
             for incoming_road, connecting_road, contact_point in lane_link:
-                
-                connecting_way = self.opendrive.roads[connecting_road].start_lway_id + roadcnt if side=='l' else self.opendrive.roads[connecting_road].start_rway_id + roadcnt
-                incoming_way = self.opendrive.roads[incoming_road].start_lway_id + roadcnt if side=='l' else self.opendrive.roads[incoming_road].start_rway_id + roadcnt
-                contact_node_id = self.ways[connecting_way].nodes_id[0 if contact_point == 'start' else -1]
+
+                connecting_way = self.opendrive.roads[
+                    connecting_road].start_lway_id + roadcnt if side == 'l' else self.opendrive.roads[
+                        connecting_road].start_rway_id + roadcnt
+                incoming_way = self.opendrive.roads[
+                    incoming_road].start_lway_id + roadcnt if side == 'l' else self.opendrive.roads[
+                        incoming_road].start_rway_id + roadcnt
+                contact_node_id = self.ways[connecting_way].nodes_id[
+                    0 if contact_point == 'start' else -1]
                 way_end = self.way_end_to_point(contact_node_id, incoming_way)
 
                 line2_nodes.append(
                     self.nodes[self.ways[incoming_way].nodes_id[way_end]])
                 line2_nodes.append(
-                    self.nodes[self.ways[incoming_way].nodes_id[(way_end + 1 if way_end == 0 else way_end - 1)]])
+                    self.nodes[self.ways[incoming_way].nodes_id[(
+                        way_end + 1 if way_end == 0 else way_end - 1)]])
                 incomings.append(incoming_way)
                 ends.append(way_end)
 
             # calculate the cross point of line(1,2) and line(3,4)
             cross_point = line_cross(line1_nodes, line2_nodes)
-            cross_point.z = (line1_nodes[0].z + line1_nodes[1].z + line2_nodes[0].z + line2_nodes[1].z) /4
+            cross_point.z = (line1_nodes[0].z + line1_nodes[1].z +
+                             line2_nodes[0].z + line2_nodes[1].z) / 4
 
             line1_nodes.extend(line2_nodes)
-            self.min_distance_to_center = min(point_distance(
-                cross_point, p) for p in line1_nodes)
-        
-            new_node_id = self.add_node(cross_point.x, cross_point.y, cross_point.z, min([junction.max_arcrad, self.min_distance_to_center]))
-            
+            self.min_distance_to_center = min(
+                point_distance(cross_point, p) for p in line1_nodes)
+
+            new_node_id = self.add_node(
+                cross_point.x, cross_point.y, cross_point.z,
+                min([junction.max_arcrad, self.min_distance_to_center]))
+
             for incoming_way, way_end in zip(incomings, ends):
                 self.ways[incoming_way].nodes_id[way_end] = new_node_id
 
         return is_Tshape_junction
-
 
     def handle_Xshape(self, junction):
 
@@ -349,7 +479,6 @@ class Converter(object):
         while (self.handle_Xshape_singleway(junction, 'r', roadcnt)):
             roadcnt += 1
 
-    
     def handle_Xshape_singleway(self, junction, side, roadcnt):
 
         line_nodes = list()
@@ -357,16 +486,25 @@ class Converter(object):
         ends = list()
         ret = 0
         for incoming_road, connecting_road, contact_point in junction.lane_link:
-            inn = self.opendrive.roads[incoming_road].ln if side=='l' else self.opendrive.roads[incoming_road].rn
-            con = self.opendrive.roads[connecting_road].ln if side=='l' else self.opendrive.roads[connecting_road].rn
+            inn = self.opendrive.roads[
+                incoming_road].ln if side == 'l' else self.opendrive.roads[
+                    incoming_road].rn
+            con = self.opendrive.roads[
+                connecting_road].ln if side == 'l' else self.opendrive.roads[
+                    connecting_road].rn
             min = inn if inn < con else con
             if (roadcnt >= min):
                 continue
 
             ret += 1
-            connecting_way = self.opendrive.roads[connecting_road].start_lway_id + roadcnt if side=='l' else self.opendrive.roads[connecting_road].start_rway_id + roadcnt
-            incoming_way = self.opendrive.roads[incoming_road].start_lway_id + roadcnt if side=='l' else self.opendrive.roads[incoming_road].start_rway_id + roadcnt
-            contact_node_id = self.ways[connecting_way].nodes_id[0 if contact_point == 'start' else -1]
+            connecting_way = self.opendrive.roads[
+                connecting_road].start_lway_id + roadcnt if side == 'l' else self.opendrive.roads[
+                    connecting_road].start_rway_id + roadcnt
+            incoming_way = self.opendrive.roads[
+                incoming_road].start_lway_id + roadcnt if side == 'l' else self.opendrive.roads[
+                    incoming_road].start_rway_id + roadcnt
+            contact_node_id = self.ways[connecting_way].nodes_id[
+                0 if contact_point == 'start' else -1]
             way_end = self.way_end_to_point(contact_node_id, incoming_way)
             line_nodes.append(
                 self.nodes[self.ways[incoming_way].nodes_id[way_end]])
@@ -378,17 +516,21 @@ class Converter(object):
             return 0
         diag_node_index = find_diagonal(line_nodes)
         if diag_node_index != 1:  # we fix 0,1 as diagonal pair
-            line_nodes[1], line_nodes[diag_node_index] = line_nodes[diag_node_index], line_nodes[1]
+            line_nodes[1], line_nodes[diag_node_index] = line_nodes[
+                diag_node_index], line_nodes[1]
 
         cross_point = line_cross(line_nodes[:2], line_nodes[2:])
-        cross_point.z = (line_nodes[0].z + line_nodes[1].z + line_nodes[2].z + line_nodes[3].z) /4
+        cross_point.z = (line_nodes[0].z + line_nodes[1].z + line_nodes[2].z +
+                         line_nodes[3].z) / 4
 
-        self.min_distance_to_center = min(point_distance(
-            cross_point, p) for p in line_nodes)
+        self.min_distance_to_center = min(
+            point_distance(cross_point, p) for p in line_nodes)
         # print(self.min_distance_to_center, junction.max_arcrad)
 
-        new_node_id = self.add_node(cross_point.x, cross_point.y, cross_point.z, min([junction.max_arcrad, self.min_distance_to_center]))
-        
+        new_node_id = self.add_node(
+            cross_point.x, cross_point.y, cross_point.z,
+            min([junction.max_arcrad, self.min_distance_to_center]))
+
         for incoming_way, way_end in zip(incomings, ends):
             self.ways[incoming_way].nodes_id[way_end] = new_node_id
 
@@ -403,9 +545,8 @@ class Converter(object):
         while (self.handle_Nshape_singleway(junction, 'r', roadcnt)):
             roadcnt += 1
 
-    
     def handle_Nshape_singleway(self, junction, side, roadcnt):
-        
+
         line1_nodes = list()
         line2_nodes = list()
         ret = 0
@@ -414,46 +555,64 @@ class Converter(object):
 
         # add the contact point of an incoming road as line1
         incoming_road, connecting_road, contact_point = junction.lane_link[0]
-        inn = self.opendrive.roads[incoming_road].ln if side=='l' else self.opendrive.roads[incoming_road].rn
-        con = self.opendrive.roads[connecting_road].ln if side=='l' else self.opendrive.roads[connecting_road].rn
+        inn = self.opendrive.roads[
+            incoming_road].ln if side == 'l' else self.opendrive.roads[
+                incoming_road].rn
+        con = self.opendrive.roads[
+            connecting_road].ln if side == 'l' else self.opendrive.roads[
+                connecting_road].rn
         min = inn if inn < con else con
         if (roadcnt >= min):
             return 0
-        
+
         ret += 1
-        connecting_way = self.opendrive.roads[connecting_road].start_lway_id + roadcnt if side=='l' else self.opendrive.roads[connecting_road].start_rway_id + roadcnt
-        incoming_way = self.opendrive.roads[incoming_road].start_lway_id + roadcnt if side=='l' else self.opendrive.roads[incoming_road].start_rway_id + roadcnt
-        
-        contact_node_id = self.ways[connecting_way].nodes_id[0 if contact_point == 'start' else -1]
+        connecting_way = self.opendrive.roads[
+            connecting_road].start_lway_id + roadcnt if side == 'l' else self.opendrive.roads[
+                connecting_road].start_rway_id + roadcnt
+        incoming_way = self.opendrive.roads[
+            incoming_road].start_lway_id + roadcnt if side == 'l' else self.opendrive.roads[
+                incoming_road].start_rway_id + roadcnt
+
+        contact_node_id = self.ways[connecting_way].nodes_id[
+            0 if contact_point == 'start' else -1]
         way_end = self.way_end_to_point(contact_node_id, incoming_way)
 
         line1_nodes.append(
             self.nodes[self.ways[incoming_way].nodes_id[way_end]])
-        line1_nodes.append(
-            self.nodes[self.ways[incoming_way].nodes_id[(way_end + 1 if way_end == 0 else way_end - 1)]])
+        line1_nodes.append(self.nodes[self.ways[incoming_way].nodes_id[(
+            way_end + 1 if way_end == 0 else way_end - 1)]])
         # self.ways[incoming_road].nodes_id[way_end] = self.node_id
         first_incoming = incoming_way
         first_end = way_end
 
-
         # add the contact point of an incoming road as line2
-        for incoming_road, connecting_road, contact_point in junction.lane_link[1:]:
-            inn = self.opendrive.roads[incoming_road].ln if side=='l' else self.opendrive.roads[incoming_road].rn
-            con = self.opendrive.roads[connecting_road].ln if side=='l' else self.opendrive.roads[connecting_road].rn
+        for incoming_road, connecting_road, contact_point in junction.lane_link[
+                1:]:
+            inn = self.opendrive.roads[
+                incoming_road].ln if side == 'l' else self.opendrive.roads[
+                    incoming_road].rn
+            con = self.opendrive.roads[
+                connecting_road].ln if side == 'l' else self.opendrive.roads[
+                    connecting_road].rn
             min = inn if inn < con else con
             if (roadcnt >= min):
                 continue
             ret += 1
-            connecting_way = self.opendrive.roads[connecting_road].start_lway_id + roadcnt if side=='l' else self.opendrive.roads[connecting_road].start_rway_id + roadcnt
-            incoming_way = self.opendrive.roads[incoming_road].start_lway_id + roadcnt if side=='l' else self.opendrive.roads[incoming_road].start_rway_id + roadcnt
-            contact_node_id = self.ways[connecting_way].nodes_id[0 if contact_point == 'start' else -1]
+            connecting_way = self.opendrive.roads[
+                connecting_road].start_lway_id + roadcnt if side == 'l' else self.opendrive.roads[
+                    connecting_road].start_rway_id + roadcnt
+            incoming_way = self.opendrive.roads[
+                incoming_road].start_lway_id + roadcnt if side == 'l' else self.opendrive.roads[
+                    incoming_road].start_rway_id + roadcnt
+            contact_node_id = self.ways[connecting_way].nodes_id[
+                0 if contact_point == 'start' else -1]
             way_end = self.way_end_to_point(contact_node_id, incoming_way)
 
             line2_nodes.append(
                 self.nodes[self.ways[incoming_way].nodes_id[way_end]])
-            
-            line2_nodes.append(
-                self.nodes[self.ways[incoming_way].nodes_id[(way_end + 1 if way_end == 0 else way_end - 1)]])
+
+            line2_nodes.append(self.nodes[self.ways[incoming_way].nodes_id[(
+                way_end + 1 if way_end == 0 else way_end - 1)]])
 
             # calculate the cross point of line1 and line2
             cross_point = line_cross(line1_nodes, line2_nodes)
@@ -462,16 +621,18 @@ class Converter(object):
             # print(self.node_id)
 
             if last_node_id is not None:
-                if point_distance(self.nodes[last_node_id], cross_point) > self.min_distance * 10:
+                if point_distance(self.nodes[last_node_id],
+                                  cross_point) > self.min_distance * 10:
                     # connect incoming road to the new cross point
                     # and insert new cross point into last road
-                    new_node_id = self.add_node(cross_point.x, cross_point.y, 0, 5)
+                    new_node_id = self.add_node(cross_point.x, cross_point.y,
+                                                0, 5)
                     self.ways[incoming_way].nodes_id[way_end] = new_node_id
                     last_node_id = new_node_id
 
-                    self.insert_node(last_incoming, new_node_id, last_end )
-                    
-                else: # connect incoming road to last cross point
+                    self.insert_node(last_incoming, new_node_id, last_end)
+
+                else:  # connect incoming road to last cross point
                     self.ways[incoming_way].nodes_id[way_end] = last_node_id
 
             else:
@@ -485,20 +646,19 @@ class Converter(object):
 
         return ret
 
-
-
     def add_node(self, x, y, z, arc=0):
         # search for dup
         near_node_ids = self.spindex.intersect((x, y, x, y))
 
-        if len(near_node_ids) > 0: # dup exists
+        if len(near_node_ids) > 0:  # dup exists
             # if the new node A is quite close to an existing node B, use B
             return near_node_ids[0]
         else:
             # add a new node
             self.nodes.append(Node(self.node_id, x, y, z, arc))
-            self.spindex.insert(
-                self.node_id, (x-self.min_distance, y-self.min_distance, x+self.min_distance, y+self.min_distance))
+            self.spindex.insert(self.node_id,
+                                (x - self.min_distance, y - self.min_distance,
+                                 x + self.min_distance, y + self.min_distance))
             self.node_id = self.node_id + 1
             return self.node_id - 1
 
@@ -506,63 +666,96 @@ class Converter(object):
         new_node = self.nodes[node_id]
         way_nodes_id = self.ways[way_id].nodes_id
         found = False
-        for i in range(len(way_nodes_id)-1):
+        for i in range(len(way_nodes_id) - 1):
             node = self.nodes[way_nodes_id[i]]
-            next_node = self.nodes[way_nodes_id[i+1]]
-            if min(node.x , next_node.x) <= new_node.x <= max(node.x , next_node.x) and min(node.y , next_node.y) <= new_node.y <= max(node.y , next_node.y):
-                if (new_node.x - node.x) * (next_node.y - node.y) == (next_node.x - node.x) * (new_node.y - node.y):
+            next_node = self.nodes[way_nodes_id[i + 1]]
+            if min(node.x, next_node.x) <= new_node.x <= max(
+                    node.x, next_node.x) and min(
+                        node.y, next_node.y) <= new_node.y <= max(
+                            node.y, next_node.y):
+                if (new_node.x - node.x) * (next_node.y - node.y) == (
+                        next_node.x - node.x) * (new_node.y - node.y):
                     self.ways[way_id].nodes_id.insert(i, node_id)
                     found = True
                     break
         if not found:
-            if way_end == 0:   
+            if way_end == 0:
                 self.ways[way_id].nodes_id.insert(0, node_id)
             else:
                 self.ways[way_id].nodes_id.append(node_id)
 
-    def generate_osm(self, filename, debug = False):
+    def generate_osm(self, filename, debug=False):
         # plt.axis('scaled')
-        wgs84_to_utm =Proj(proj='utm',zone=50,ellps='WGS84')
-        base_utmx,base_utmy=wgs84_to_utm(self.opendrive.lon,self.opendrive.lat)
+        wgs84_to_utm = Proj(proj='utm', zone=48, ellps='WGS84')
+        # BUG opendrivepy lon lat parse　ERROR!
+        self.opendrive.lon = 104.264948026549
+        self.opendrive.lat = 30.678746161566771
+        base_utmx, base_utmy = wgs84_to_utm(self.opendrive.lon,
+                                            self.opendrive.lat)
         if debug:
-           
-           
-            list_x=list()
-            list_y=list()
-            for way_id in [8,9,10,11,12]:
+
+            list_x = list()
+            list_y = list()
+            for way_id in [8, 9, 10, 11, 12]:
                 for id in self.ways[way_id].nodes_id:
-                    node=self.nodes[id]
-                    if id!=node.id:
+                    node = self.nodes[id]
+                    if id != node.id:
                         print("not equal")
                     list_x.append(node.x)
                     list_y.append(node.y)
-                plt.plot(list_x, list_y,"-o")
-                
+                plt.plot(list_x, list_y, "-o")
+
                 # ax.scatter(list_x,list_y)
                 # for i in range(len(list_x)):
                 #     ax.annotate(str(node_list[i])+"+"+str(i),(list_x[i],list_y[i]))
                 plt.axis('scaled')
-            
-            plt.show()
-        osm_attrib = {'version': "0.6", 'generator': "xodr_OSM_converter", 'copyright': "Simon",
-                      'attribution': "Simon", 'license': "GNU or whatever"}
-        osm_root = ET.Element('osm', osm_attrib)
 
-        bounds_attrib = {'minlat': '0', 'minlon': '0',
-                         'maxlat': '1', 'maxlon': '1'}
+            plt.show()
+
+        xml_attrib = {'version': '1.0', 'encoding': 'UTF-8'}
+        xml_root = ET.Element('xml', xml_attrib)
+        osm_attrib = {
+            'version': "0.6",
+            'generator': "xodr_OSM_converter",
+            'copyright': "Simon",
+            'attribution': "Simon",
+            'license': "GNU or whatever"
+        }
+        osm_root = ET.SubElement(xml_root, 'osm', osm_attrib)
+
+        bounds_attrib = {
+            'minlat': '0',
+            'minlon': '0',
+            'maxlat': '1',
+            'maxlon': '1'
+        }
         ET.SubElement(osm_root, 'bounds', bounds_attrib)
 
         # add all nodes into osm
         for node in self.nodes:
-            node_x,node_y= wgs84_to_utm(base_utmx+node.x,base_utmy+node.y,inverse=True)
-            node_attrib = {'id': str(node.id+1), 'visible': 'true', 'version': '1', 'changeset': '1', 'timestamp': datetime.utcnow().strftime(
-                '%Y-%m-%dT%H:%M:%SZ'), 'user': 'simon', 'uid': '1', 'lon': str(node_x ), 'lat': str(node_y), 'ele':'2'}
+            node_x, node_y = wgs84_to_utm(base_utmx + node.x,
+                                          base_utmy + node.y,
+                                          inverse=True)
+            node_attrib = {
+                'id': str(node.id + 1),
+                'visible': 'true',
+                'version': '1',
+                'changeset': '1',
+                'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'user': 'simon',
+                'uid': '1',
+                'lon': str(node_x),
+                'lat': str(node_y),
+                'ele': '2'
+            }
             node_root = ET.SubElement(osm_root, 'node', node_attrib)
 
             ET.SubElement(node_root, 'tag', {'k': "type", 'v': 'Smart'})
             ET.SubElement(node_root, 'tag', {'k': "height", 'v': str(node.z)})
             ET.SubElement(node_root, 'tag', {
-                          'k': "minArcRadius", 'v': str(node.max_arcrad)})
+                'k': "minArcRadius",
+                'v': str(node.max_arcrad)
+            })
 
         for index, way_id in enumerate(self.ways):
             # if way_id!=95 or way_id!=86:
@@ -571,33 +764,92 @@ class Converter(object):
             # if way_value.is_connecting:  # ignore all connecting roads
             #     continue
 
-            way_attrib = {'id': str(index+1), 'version': '1', 'changeset': '1',
-                          'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'), 'user': 'simon', 'uid': '1'}
+            way_attrib = {
+                'id': str(index + 1),
+                'version': '1',
+                'changeset': '1',
+                'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'user': 'simon',
+                'uid': '1'
+            }
             way_root = ET.SubElement(osm_root, 'way', way_attrib)
 
             # add all nodes of a road
             for way_node in way_value.nodes_id:
-                ET.SubElement(way_root, 'nd', {'ref': str(way_node+1)})
+                ET.SubElement(way_root, 'nd', {'ref': str(way_node + 1)})
 
             # ET.SubElement(way_root, 'tag', {'k': "highway", 'v':'tertiary'})
             ET.SubElement(way_root, 'tag', {
-                          'k': "name", 'v': 'road'+str(way_value.id)})
+                'k': "name",
+                'v': 'road' + str(way_value.id)
+            })
             ET.SubElement(way_root, 'tag', {
-                          'k': "streetWidth", 'v': str(way_value.width)})
+                'k': "streetWidth",
+                'v': str(way_value.width)
+            })
             ET.SubElement(way_root, 'tag', {
-                          'k': "streetOffset", 'v': str(way_value.offset)})
+                'k': "streetOffset",
+                'v': str(way_value.offset)
+            })
             ET.SubElement(way_root, 'tag', {
-                          'k': "sidewalkWidthLeft", 'v': str(way_value.widthleftwalk)})
+                'k': "sidewalkWidthLeft",
+                'v': str(way_value.widthleftwalk)
+            })
             ET.SubElement(way_root, 'tag', {
-                          'k': "sidewalkWidthRight", 'v': str(way_value.widthrightwalk)})
+                'k': "sidewalkWidthRight",
+                'v': str(way_value.widthrightwalk)
+            })
             ET.SubElement(way_root, 'tag', {
-                          'k': "NbrOfRightLanes", 'v': str(way_value.nrightlanes)})
+                'k': "NbrOfRightLanes",
+                'v': str(way_value.nrightlanes)
+            })
 
-            ET.SubElement(way_root, 'tag', {
-                          'k': "nLanesTotal", 'v': str(way_value.nrightlanes + way_value.nleftlanes)})
+            ET.SubElement(
+                way_root, 'tag', {
+                    'k': "nLanesTotal",
+                    'v': str(way_value.nrightlanes + way_value.nleftlanes)
+                })
             if way_value.nrightlanes == 0 or way_value.nleftlanes == 0:
                 ET.SubElement(way_root, 'tag', {
-                    'k': "Centerline", 'v': "none"})
+                    'k': "Centerline",
+                    'v': "none"
+                })
+
+        for index, relation_id in enumerate(self.relations):
+            relation_value: Relation = self.relations[relation_id]
+            relation_attrib = {
+                'id': str(index + 1),
+                'version': '1',
+                'changeset': '1',
+                'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'user': 'chenqi',
+                'uid': '2'
+            }
+            relation_root = ET.SubElement(osm_root, 'relation',
+                                          relation_attrib)
+
+            for i, way_id in enumerate(relation_value.ways_id):
+                ET.SubElement(
+                    relation_root, 'member', {
+                        'type': 'way',
+                        'ref': str(way_id + 1),
+                        'role': relation_value.ways_role[i]
+                    })
+
+            ET.SubElement(relation_root, 'tag', {
+                'k': 'location',
+                'v': relation_value.location
+            })
+
+            ET.SubElement(relation_root, 'tag', {
+                'k': 'subtype',
+                'v': relation_value.subtype
+            })
+
+            ET.SubElement(relation_root, 'tag', {
+                'k': 'type',
+                'v': relation_value.type
+            })
 
         tree = ET.ElementTree(osm_root)
         tree.write(filename)
@@ -607,17 +859,33 @@ RESOURCE_PATH = "../resource/"
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='A random road generator')
-    parser.add_argument('--debug', type=bool, default=False, help='Is using debug mode')
-    parser.add_argument('--input_file', type=str, default='testfield_no_roundabout.xodr', help='Input OpenDRIVE file name')
-    parser.add_argument('--scale', type=int, default=10000, help='Scale of xodr file (in meter)')
-    parser.add_argument('--precise', type=int, default=0.1, help='Precision of OSM file (in meter)')
-    parser.add_argument('--output_file', type=str, default='example.osm', help='Output OSM file name')
+    parser.add_argument('--debug',
+                        type=bool,
+                        default=False,
+                        help='Is using debug mode')
+    parser.add_argument('--input_file',
+                        type=str,
+                        default='testfield_no_roundabout.xodr',
+                        help='Input OpenDRIVE file name')
+    parser.add_argument('--scale',
+                        type=int,
+                        default=10000,
+                        help='Scale of xodr file (in meter)')
+    parser.add_argument('--precise',
+                        type=float,
+                        default=0.1,
+                        help='Precision of OSM file (in meter)')
+    parser.add_argument('--output_file',
+                        type=str,
+                        default='example.osm',
+                        help='Output OSM file name')
     args = parser.parse_args()
     print(args)
 
     print('Start converting file...')
 
-    converter = Converter(RESOURCE_PATH + args.input_file, args.scale, args.precise)
+    converter = Converter(RESOURCE_PATH + args.input_file, args.scale,
+                          args.precise)
     converter.generate_osm(RESOURCE_PATH + args.output_file, args.debug)
 
     print('All done')
